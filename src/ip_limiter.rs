@@ -3,7 +3,6 @@
 use crate::rate_limiter::{RateLimiterProps, RateLimiterState, Units};
 use fxhash::FxHashMap;
 use log::warn;
-use rand::random;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -224,7 +223,6 @@ enum WarningKind {
         connections: u32,
         active_sessions: u32,
         limit: u32,
-        hard: bool,
     },
 }
 
@@ -242,12 +240,12 @@ pub struct IpStats {
     // Max concurrent [ActiveSession]s.
     // pub max_active_sessions: u32,
     /// Last time this IP hit a hard limit.
-    pub last_hard_limit: Option<Instant>,
+    pub last_limit: Option<Instant>,
 }
 
 impl IpStats {
-    fn increment_hard_limited(&mut self, now: Instant) {
-        self.last_hard_limit = Some(now);
+    fn limited(&mut self, now: Instant) {
+        self.last_limit = Some(now);
     }
 }
 
@@ -302,7 +300,7 @@ impl Usage {
                 first: now,
                 connections: 0,
                 active_sessions: 0,
-                last_hard_limit: None,
+                last_limit: None,
             },
         }
     }
@@ -346,7 +344,7 @@ impl<P: ProvideIpLimiter> ConnectionPermit<P> {
                     );
 
                 if should_rate_limit {
-                    entry.stats.increment_hard_limited(now);
+                    entry.stats.limited(now);
                     limiter.warn(
                         Warning {
                             label,
@@ -367,41 +365,27 @@ impl<P: ProvideIpLimiter> ConnectionPermit<P> {
                     .last_soft_limit
                     .filter(|&last| now.duration_since(last) < limiter.ddos_memory)
                     .is_some();
-                let recent_local_hard_limit = entry
+                let recent_local_limit = entry
                     .stats
-                    .last_hard_limit
+                    .last_limit
                     .filter(|&last| now.duration_since(last) < limiter.ddos_memory)
                     .is_some();
-                let enforce_soft_limit =
-                    (!old || recent_local_hard_limit) && recent_global_soft_limit;
-                let soft_limit =
-                    (entry.stats.active_sessions + 1).saturating_mul(if enforce_soft_limit {
+                let strict_limit = (!old || recent_local_limit) && recent_global_soft_limit;
+                let limit = (entry.stats.active_sessions + 1 + (!strict_limit) as u32)
+                    .saturating_mul(if strict_limit {
                         limiter.connections_per_active_p90
                     } else {
                         limiter.connections_per_active_p99
                     });
-                let hard_limit = if enforce_soft_limit {
-                    soft_limit
-                } else {
-                    soft_limit.saturating_add(limiter.connections_per_active_p90)
-                };
-                let hit_hard_limit = entry.stats.connections >= hard_limit;
-                if hit_hard_limit || (entry.stats.connections >= soft_limit && random()) {
-                    if hit_hard_limit {
-                        entry.stats.increment_hard_limited(now);
-                    }
+                if entry.stats.connections >= limit {
+                    entry.stats.limited(now);
                     let warning = Warning {
                         ip,
                         label,
                         kind: WarningKind::ConnectionCount {
                             connections: entry.stats.connections,
                             active_sessions: entry.stats.active_sessions,
-                            limit: if hit_hard_limit {
-                                hard_limit
-                            } else {
-                                soft_limit
-                            },
-                            hard: hit_hard_limit,
+                            limit,
                         },
                     };
                     limiter.warn(warning, now);
@@ -534,13 +518,8 @@ impl IpLimiter {
                         connections,
                         active_sessions,
                         limit,
-                        hard,
                     } => {
-                        warn!("{ip} hit {} conn limit {limit} with {label} ({active_sessions} act, {connections} tot)", if hard {
-                            "hard"
-                        } else {
-                            "soft"
-                        });
+                        warn!("{ip} hit conn limit {limit} with {label} ({active_sessions} act, {connections} tot)");
                     }
                 }
             }
@@ -600,7 +579,7 @@ impl IpLimiter {
             .should_limit_rate_with_now_and_usage(&self.connection_rate_limit, now, bytes);
 
         if should_limit_rate {
-            entry.stats.increment_hard_limited(now);
+            entry.stats.limited(now);
         }
 
         self.maybe_prune(now);
