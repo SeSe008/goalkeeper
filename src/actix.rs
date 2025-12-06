@@ -1,6 +1,5 @@
 //! `actix-web` DoS mitigation utilities
 
-
 use std::future::{ready, Ready};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -24,12 +23,12 @@ pub struct KillSwitch {
 impl KillSwitch {
     /// Request connection to closed
     pub fn kill(&self) {
-	self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Whether kill switch is activated
     pub fn is_killed(&self) -> bool {
-	self.killed.load(std::sync::atomic::Ordering::Relaxed)
+        self.killed.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -48,14 +47,14 @@ pub struct DosMitigation<P = SystemIpLimiter> {
 impl DosMitigation<SystemIpLimiter> {
     /// Create a default instance of the Mitigation using the default IP-Limiter
     pub fn default() -> Self {
-	DosMitigation { provider: SystemIpLimiter }
+        DosMitigation { provider: SystemIpLimiter }
     }
 }
 
 impl<P> DosMitigation<P> {
     /// Create a new instance of the Mitigation using a custom provider
     pub fn new(provider: P) -> Self {
-	DosMitigation { provider }
+        DosMitigation { provider }
     }
 }
 
@@ -71,7 +70,7 @@ where
     type InitError = ();
     type Transform = DosMitigationMiddleware<S, P>;
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
-    
+
     fn new_transform(&self, service: S) -> Self::Future {
         ready(Ok(DosMitigationMiddleware {
             service,
@@ -100,52 +99,52 @@ where
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-	let ip = req
-	    .peer_addr()
-	    .map(|addr| addr.ip());
+        let ip = req
+            .peer_addr()
+            .map(|addr| addr.ip());
 
-	let permit = ip.
-	    and_then(|ip| {
-		ConnectionPermit::new_with(ip, "HTTP request", self.provider.clone())
-	    });
+        let permit = ip
+            .and_then(|ip| {
+                ConnectionPermit::new_with(ip, "HTTP request", self.provider.clone())
+            });
 
-	// Permit not retrievable (rate limit active or ip missing) -> 429 + force close
-	if permit.is_none() {
-	    let (req_head, _pl) = req.into_parts();
-	    
-	    let mut res = HttpResponse::TooManyRequests()
-		.json("Too many requests");
+        // Permit not retrievable (rate limit active or ip missing) -> 429 + force close
+        if permit.is_none() {
+            let (req_head, _pl) = req.into_parts();
 
-	    res
-		.head_mut()
-		.set_connection_type(ConnectionType::Close);
-	    
-	    let srv_res = ServiceResponse::new(req_head, res).map_into_right_body();
+            let mut res = HttpResponse::TooManyRequests()
+                .json("Too many requests");
+
+            res
+                .head_mut()
+                .set_connection_type(ConnectionType::Close);
+
+            let srv_res = ServiceResponse::new(req_head, res).map_into_right_body();
             return Box::pin(async { Ok(srv_res) });
-	}
+        }
 
-	// Checked above
-	let permit = permit.unwrap();
+        // Checked above
+        let permit = permit.unwrap();
 
-	// Create and insert kill switch into req
-	let kill_switch = KillSwitch {
-	    killed: Arc::new(AtomicBool::new(false))
-	};
+        // Create and insert kill switch into req
+        let kill_switch = KillSwitch {
+            killed: Arc::new(AtomicBool::new(false)),
+        };
 
-	req.extensions_mut().insert(kill_switch.clone());
-	
-	let fut = self.service.call(req);
+        req.extensions_mut().insert(kill_switch.clone());
 
-	Box::pin(async move {
-	    let mut res = fut.await?;
-	    if kill_switch.is_killed() {
-		res
-		    .response_mut()
-		    .head_mut()
-		    .set_connection_type(ConnectionType::Close);
-	    }
-	    drop(permit);
-	    Ok(res.map_into_left_body())
-	})
+        let fut = self.service.call(req);
+
+        Box::pin(async move {
+            let mut res = fut.await?;
+            if kill_switch.is_killed() {
+                res
+                    .response_mut()
+                    .head_mut()
+                    .set_connection_type(ConnectionType::Close);
+            }
+            drop(permit);
+            Ok(res.map_into_left_body())
+        })
     }
 }
