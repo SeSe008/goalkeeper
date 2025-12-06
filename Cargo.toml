@@ -33,7 +33,7 @@ tokio-websockets = { version = "0.12.3", features = ["client", "rand", "ring"], 
 default = []
 tokio = ["dep:tokio", "socket2"]
 axum = ["dep:axum", "axum-server", "tokio", "tower", "pin-project"]
-actix = ["dep:actix-web", "actix-http", "tokio", "futures-util", "pin-project"]
+actix = ["dep:actix-web", "actix-http", "tokio", "futures-util"]
 
 [[example]]
 name = "axum_ddos"

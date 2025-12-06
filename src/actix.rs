@@ -6,14 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use actix_http::ConnectionType;
-use actix_web::body::{BodySize, EitherBody, MessageBody};
+use actix_web::body::{EitherBody, MessageBody};
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready};
 use actix_web::{HttpResponse, HttpMessage};
-use actix_web::web::Bytes;
 use futures_util::future::LocalBoxFuture;
-use pin_project::pin_project;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use crate::ip_limiter::{ConnectionPermit, ProvideIpLimiter, SystemIpLimiter};
 
@@ -70,7 +66,7 @@ where
     B: MessageBody + 'static,
     P: ProvideIpLimiter + Clone + Send + Sync + 'static,
 {
-    type Response = ServiceResponse<EitherBody<PermitBody<B, P>>>;
+    type Response = ServiceResponse<EitherBody<B>>;
     type Error = actix_web::Error;
     type InitError = ();
     type Transform = DosMitigationMiddleware<S, P>;
@@ -90,33 +86,6 @@ pub struct DosMitigationMiddleware<S, P> {
     provider: P,
 }
 
-/// Response body that keeps a [`ConnectionPermit`] alive until the body is dropped.
-#[pin_project]
-pub struct PermitBody<B, P: ProvideIpLimiter> {
-    #[pin]
-    body: B,
-    permit: Option<ConnectionPermit<P>>,
-}
-
-impl<B, P> MessageBody for PermitBody<B, P>
-where
-    B: MessageBody,
-    P: ProvideIpLimiter + Clone + Send + Sync + 'static,
-{
-    type Error = B::Error;
-
-    fn size(&self) -> BodySize {
-        self.body.size()
-    }
-
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Bytes, Self::Error>>> {
-        self.project().body.poll_next(cx)
-    }
-}
-
 impl<S, B, P> Service<ServiceRequest> for DosMitigationMiddleware<S, P>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error>,
@@ -124,7 +93,7 @@ where
     B: MessageBody + 'static,
     P: ProvideIpLimiter + Clone + Send + Sync + 'static,
 {
-    type Response = ServiceResponse<EitherBody<PermitBody<B, P>>>;
+    type Response = ServiceResponse<EitherBody<B>>;
     type Error = actix_web::Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
@@ -175,10 +144,7 @@ where
 		    .head_mut()
 		    .set_connection_type(ConnectionType::Close);
 	    }
-	    let res = res.map_body(|_, body| PermitBody {
-		body,
-		permit: Some(permit),
-	    });
+	    drop(permit);
 	    Ok(res.map_into_left_body())
 	})
     }
